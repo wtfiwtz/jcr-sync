@@ -88,12 +88,12 @@ def perform_requests(ar_node, http_src, http_dest, root_node)
 
   if not_found
     puts "[creating]".green
-    display(ar_node, http_dest, data, root_node) if $DEBUG_DISPLAY
+    display(ar_node, http_src, http_dest, data, root_node) if $DEBUG_DISPLAY
     handle_creation(ar_node, data, http_src, http_dest, root_node)
 
   else
     puts "[updating]".yellow
-    display(ar_node, http_dest, data, root_node) if $DEBUG_DISPLAY
+    display(ar_node, http_src, http_dest, data, root_node) if $DEBUG_DISPLAY
     data_dest = JSON.parse(response_dest.body)
     keys_in_src = data.keys.sort - data_dest.keys.sort
     keys_in_dest = data_dest.keys.sort - data.keys.sort
@@ -150,8 +150,8 @@ def handle_creation(ar_node, data, http_src, http_dest, root_node, subnode = fal
   # Now add any date and binary keys
   handle_date_and_binary_properties(data, http_src, http_dest, root_node, date_keys, binary_keys)
 
-  # Now add any child nodes to be done
-  add_all_child_nodes(ar_node, http_src, http_dest, data, root_node)
+  # Now add any child nodes to be done (only at the top level)
+  add_all_child_nodes(ar_node, http_src, http_dest, data, root_node) unless subnode
 end
 
 def handle_date_and_binary_properties(data, http_src, http_dest, root_node, date_keys, binary_keys)
@@ -198,7 +198,7 @@ def add_all_child_nodes(ar_node, http_src, http_dest, data, root_node)
   end
 end
 
-def display(ar_node, http_dest, data, root_node)
+def display(ar_node, http_src, http_dest, data, root_node)
   data.each do |k, v|
     case v
       when TrueClass, FalseClass  then display_bool(k, v)
@@ -206,7 +206,7 @@ def display(ar_node, http_dest, data, root_node)
       when Fixnum                 then display_long(k, v)
       when Float                  then display_float(k, v)
       when Array                  then display_array(data, k, v)
-      when Hash                   then handle_hash_or_child_nodes(ar_node, http_dest, root_node, k, v, false)
+      when Hash                   then handle_hash_or_child_nodes(ar_node, http_src, http_dest, root_node, k, v, false)
       else
         raise "  #{k} - unknown\n===\n #{v}\n===\n"
     end
@@ -353,7 +353,7 @@ end
 
 def handle_hash_or_child_nodes(ar_node, http_src, http_dest, root_node, property, hash, create = true)
   return handle_child_nodes(ar_node, http_src, http_dest, root_node, property, hash, create) if hash['jcr:primaryType'].present?
-  return if hash == {} # happens with sub-nodes?
+  return if hash == {} or not create # happens with sub-nodes?
   raise "  #{property}: Hash (multi-val property) data: #{hash}".red
 end
 
