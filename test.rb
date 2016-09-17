@@ -221,6 +221,11 @@ def handle_add_remove_keys(data, data_dest, http_src, http_dest, root_node, keys
 end
 
 def handle_merge(data, data_dest, http_src, http_dest, root_node, keys_in_common, is_merging = true)
+  if root_node[/[\[\]]/]
+    puts "    !!! Skipping invalid duplicate node! #{root_node}".red
+    return
+  end
+
   updates = {}
   differences = false
   keys_in_common.each do |k|
