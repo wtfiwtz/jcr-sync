@@ -235,7 +235,7 @@ def handle_merge(data, data_dest, http_src, http_dest, root_node, keys_in_common
     next if k.start_with?(':')
 
     case v
-      when String then update_text.push "^#{root_node}/#{k} : \"#{v.gsub('"', '\"')}\""
+      when String then update_text.push "^#{root_node}/#{k} : \"#{string_subst(v)}\""
       when Fixnum then update_text.push "^#{root_node}/#{k} : #{v}"
       when Float then update_text.push "^#{root_node}/#{k} : #{v}"
       when TrueClass, FalseClass then update_text.push "^#{root_node}/#{k} : #{v}"
@@ -262,6 +262,27 @@ def handle_merge(data, data_dest, http_src, http_dest, root_node, keys_in_common
   handle_date_and_binary_properties(data, http_src, http_dest, root_node, date_keys, binary_keys) if date_keys.any? or binary_keys.any?
 
   differences
+end
+
+def string_subst(v)
+  return '' unless v
+  splits = v.split("\n")
+  merged = splits.collect do |line|
+    {
+        '"' => '\"',
+        "\b" => '\b',
+        "\t" => '\t',
+        "\f" => '\f',
+        "\r" => '\r'
+
+    }.each do |k, v|
+      line.gsub!(k, v)
+    end
+
+    line
+  end.join('\n') # Use a literal \n, not a real newline
+
+  merged
 end
 
 def handle_remove_properties(http_dest, data_dest, root_node, keys_in_dest)
