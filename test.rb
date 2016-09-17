@@ -58,6 +58,9 @@ START_PATH = ENV['ROOT']
 DEPTH = 2
 RECURSIVE = true
 
+DATE_MIME_TYPE = 'jcr-value/date'
+BINARY_MIME_TYPE = 'jcr-value/binary'
+
 $DEBUG = false
 $DEBUG_DISPLAY = false
 
@@ -78,25 +81,25 @@ def perform_requests(ar_node, http_src, http_dest, root_node)
 
   if not_found
     puts "[creating]".green
-    display(ar_node, http_src, http_dest, data, root_node) if $DEBUG_DISPLAY
-    handle_creation(ar_node, data, http_dest, root_node)
+    display(ar_node, http_dest, data, root_node) if $DEBUG_DISPLAY
+    handle_creation(ar_node, data, http_src, http_dest, root_node)
 
   else
     puts "[updating]".yellow
-    display(ar_node, http_src, http_dest, data, root_node) if $DEBUG_DISPLAY
+    display(ar_node, http_dest, data, root_node) if $DEBUG_DISPLAY
     data_dest = JSON.parse(response_dest.body)
     keys_in_src = data.keys.sort - data_dest.keys.sort
     keys_in_dest = data_dest.keys.sort - data.keys.sort
     keys_in_common = data.keys.sort - keys_in_src
     if keys_in_src.any? or keys_in_dest.any?
       puts "    [diff-keys: src=#{keys_in_src}, dest=#{keys_in_dest}"
-      handle_add_remove_keys(data, data_dest, http_dest, root_node, keys_in_src, keys_in_dest)
+      handle_add_remove_keys(data, data_dest, http_src, http_dest, root_node, keys_in_src, keys_in_dest)
     end
-    changed = handle_merge(data, data_dest, http_dest, root_node, keys_in_common) if keys_in_common
+    changed = handle_merge(data, data_dest, http_src, http_dest, root_node, keys_in_common) if keys_in_common
     puts '    [identical]'.yellow unless changed or keys_in_src.any? or keys_in_dest.any?
 
     # Now add any child nodes to be done
-    add_all_child_nodes(ar_node, http_dest, data, root_node)
+    add_all_child_nodes(ar_node, http_src, http_dest, data, root_node)
 
     puts "\n\n"
   end
@@ -104,7 +107,7 @@ def perform_requests(ar_node, http_src, http_dest, root_node)
   ar_node.update_attributes!(status: :complete, last_synced_at: DateTime.current)
 end
 
-def handle_creation(ar_node, data, http_dest, root_node, subnode = false)
+def handle_creation(ar_node, data, http_src, http_dest, root_node, subnode = false)
   uri_dest = URI("#{WEBDAV_DST}/server/#{WORKSPACE}/jcr%3aroot/")
 
   if root_node[/[\[\]]/]
@@ -114,12 +117,15 @@ def handle_creation(ar_node, data, http_dest, root_node, subnode = false)
 
   # Don't do special JCR properties, or hashes (child nodes?)
   filtered_data = data.reject { |k, _v| k.start_with?(':') }.reject { |_k, v| v.is_a? Hash }
-  # ap filtered_data
 
-  request = Net::HTTP::Post::Multipart.new(uri_dest,
-                                           ':diff' => UploadIO.new(StringIO.new("+#{root_node} : #{filtered_data.to_json}"), 'text/plain'))
+  # Handle dates and binary field separately
+  date_keys = data.select { |k, v| k.start_with?(':') and v == 'Date' }.keys.collect { |k| k.gsub(/^:/, '')}
+  binary_keys = data.select { |k, v| k.start_with?(':') and !k.start_with?('::') and v.is_a? Fixnum }.keys.collect { |k| k.gsub(/^:/, '')}
+  filtered_data.delete_if { |k, _v| date_keys.include?(k) or binary_keys.include?(k) }
+
+  request = Net::HTTP::Post::Multipart.new(uri_dest, ':diff' =>
+      UploadIO.new(StringIO.new("+#{root_node} : #{filtered_data.to_json}"), 'text/plain'))
   request.basic_auth USERNAME, PASSWORD
-
   response_dest = http_dest.request(request)
 
   # If we are adding a subnode, they can fail if they already exist... just ignore and continue and the update will
@@ -134,20 +140,58 @@ def handle_creation(ar_node, data, http_dest, root_node, subnode = false)
   puts "Success! #{response_body}" if $DEBUG
   puts "    #{root_node}".green if subnode
 
+  # Now add any date and binary keys
+  handle_date_and_binary_properties(data, http_src, http_dest, root_node, date_keys, binary_keys)
+
   # Now add any child nodes to be done
-  add_all_child_nodes(ar_node, http_dest, data, root_node)
+  add_all_child_nodes(ar_node, http_src, http_dest, data, root_node)
 end
 
-def add_all_child_nodes(ar_node, http_dest, data, root_node)
+def handle_date_and_binary_properties(data, http_src, http_dest, root_node, date_keys, binary_keys)
+
+  uri_dest = URI("#{WEBDAV_DST}/server/#{WORKSPACE}/jcr%3aroot/")
+
+  date_keys.each do |k|
+    # TODO: More efficient ways to set dates? multipart boundaries?
+    request = Net::HTTP::Post::Multipart.new(uri_dest, "#{root_node}/#{k}" =>
+        UploadIO.new(StringIO.new(data[k]), DATE_MIME_TYPE))
+    request.basic_auth USERNAME, PASSWORD
+    response_dest = http_dest.request(request)
+    raise "Failed POST (dates) to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
+    response_body = JSON.parse(response_dest.body) unless response_dest.body.empty?
+    puts "         date: #{k}".blue
+    puts "Success! #{response_body}" if $DEBUG
+  end
+
+  binary_keys.each do |k|
+
+    binary_uri = Addressable::URI.parse("#{WEBDAV_SRC}/server/#{WORKSPACE}/jcr%3aroot#{URI.encode(root_node)}/#{k}")
+    binary_req = Net::HTTP::Get.new(binary_uri)
+    binary_resp = http_src.request(binary_req)
+    raise "Failed GET (binary) from SRC: #{root_node}/#{k}, #{binary_resp.code}".red unless binary_resp.code == '200'
+
+
+    request = Net::HTTP::Post::Multipart.new(uri_dest, "#{root_node}/#{k}" =>
+        UploadIO.new(StringIO.new(binary_resp.body), BINARY_MIME_TYPE))
+    request.basic_auth USERNAME, PASSWORD
+    response_dest = http_dest.request(request)
+    raise "Failed POST (binary) to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
+    response_body = JSON.parse(response_dest.body) unless response_dest.body.empty?
+    puts "         binary: #{k} (len=#{binary_resp.body.size})".blue
+    puts "Success! #{response_body}" if $DEBUG
+  end
+end
+
+def add_all_child_nodes(ar_node, http_src, http_dest, data, root_node)
   data.each do |k, v|
     case v
       when Hash
-        handle_hash_or_child_nodes(ar_node, http_dest, root_node, k, v)
+        handle_hash_or_child_nodes(ar_node, http_src, http_dest, root_node, k, v)
     end
   end
 end
 
-def display(ar_node, http_src, http_dest, data, root_node)
+def display(ar_node, http_dest, data, root_node)
   data.each do |k, v|
     case v
       when TrueClass, FalseClass  then display_bool(k, v)
@@ -162,14 +206,14 @@ def display(ar_node, http_src, http_dest, data, root_node)
   end
 end
 
-def handle_add_remove_keys(data, data_dest, http_dest, root_node, keys_in_src, keys_in_dest)
+def handle_add_remove_keys(data, data_dest, http_src, http_dest, root_node, keys_in_src, keys_in_dest)
 
   # Add keys in src, but set merging to false
-  handle_merge(data, data_dest, http_dest, root_node, keys_in_src, false)
+  handle_merge(data, data_dest, http_src, http_dest, root_node, keys_in_src, false)
   handle_remove_properties(http_dest, data_dest, root_node, keys_in_dest)
 end
 
-def handle_merge(data, data_dest, http_dest, root_node, keys_in_common, is_merging = true)
+def handle_merge(data, data_dest, http_src, http_dest, root_node, keys_in_common, is_merging = true)
   updates = {}
   differences = false
   keys_in_common.each do |k|
@@ -180,13 +224,15 @@ def handle_merge(data, data_dest, http_dest, root_node, keys_in_common, is_mergi
     updates[k] = data[k]
   end
 
+  # Handle dates and binary field separately (if they require merging)
+  date_keys = updates.select { |k, v| k.start_with?(':') and v == 'Date' }.keys.collect { |k| k.gsub(/^:/, '')}
+  binary_keys = updates.select { |k, v| k.start_with?(':') and !k.start_with?('::') and v.is_a? Fixnum }.keys.collect { |k| k.gsub(/^:/, '')}
+  filtered_data = updates.reject { |k, _v| date_keys.include?(k) or binary_keys.include?(k) }
+
   update_text = []
-  updates.each do |k, v|
+  filtered_data.each do |k, v|
     next if k == 'jcr:uuid'
-    if k.start_with?(':')
-      puts "    ... ignoring #{k}"
-      next
-    end
+    next if k.start_with?(':')
 
     case v
       when String then update_text.push "^#{root_node}/#{k} : \"#{v.gsub('"', '\"')}\""
@@ -199,17 +245,21 @@ def handle_merge(data, data_dest, http_dest, root_node, keys_in_common, is_mergi
         raise "Not handled: #{v.class}".red
     end
   end
-  return false unless update_text.any?
 
-  uri_dest = URI("#{WEBDAV_DST}/server/#{WORKSPACE}/jcr%3aroot/")
-  request = Net::HTTP::Post::Multipart.new(uri_dest,
-                                           ':diff' => UploadIO.new(StringIO.new(update_text.join("\r\n")), 'text/plain'))
-  request.basic_auth USERNAME, PASSWORD
+  if update_text.any?
+    uri_dest = URI("#{WEBDAV_DST}/server/#{WORKSPACE}/jcr%3aroot/")
+    request = Net::HTTP::Post::Multipart.new(uri_dest,
+                                             ':diff' => UploadIO.new(StringIO.new(update_text.join("\r\n")), 'text/plain'))
+    request.basic_auth USERNAME, PASSWORD
 
-  response_dest = http_dest.request(request)
-  raise "Failed POST to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
-  response_body = JSON.parse(response_dest.body) unless response_dest.body.empty?
-  puts "Successfully merged! #{response_body}" if $DEBUG
+    response_dest = http_dest.request(request)
+    raise "Failed POST to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
+    response_body = JSON.parse(response_dest.body) unless response_dest.body.empty?
+    puts "Successfully merged! #{response_body}" if $DEBUG
+  end
+
+  # Now handle date and binary properties separately
+  handle_date_and_binary_properties(data, http_src, http_dest, root_node, date_keys, binary_keys) if date_keys.any? or binary_keys.any?
 
   differences
 end
@@ -218,10 +268,7 @@ def handle_remove_properties(http_dest, data_dest, root_node, keys_in_dest)
   update_text = []
   keys_in_dest.each do |k|
     next if k == 'jcr:uuid'
-    if k.start_with?(':')
-      puts "    ... ignoring #{k} when removing properties"
-      next
-    end
+    next if k.start_with?(':')
 
     case data_dest[k]
       when String then update_text.push "-#{root_node}/#{k}"
@@ -276,13 +323,13 @@ def display_array(data, property, ary)
 end
 
 
-def handle_hash_or_child_nodes(ar_node, http_dest, root_node, property, hash, create = true)
-  return handle_child_nodes(ar_node, http_dest, root_node, property, hash, create) if hash['jcr:primaryType'].present?
+def handle_hash_or_child_nodes(ar_node, http_src, http_dest, root_node, property, hash, create = true)
+  return handle_child_nodes(ar_node, http_src, http_dest, root_node, property, hash, create) if hash['jcr:primaryType'].present?
   return if hash == {} # happens with sub-nodes?
   raise "  #{property}: Hash (multi-val property) data: #{hash}".red
 end
 
-def handle_child_nodes(ar_node, http_dest, root_node, property, hsh, create = true)
+def handle_child_nodes(ar_node, http_src, http_dest, root_node, property, hsh, create = true)
 
   node = Node.where(path: "#{root_node}/#{property}").first_or_create!(status: :incomplete, parent: ar_node, last_synced_at: nil) if create
 
@@ -295,7 +342,7 @@ def handle_child_nodes(ar_node, http_dest, root_node, property, hsh, create = tr
   end
 
   if create and DEPTH >= 2
-    handle_creation(ar_node, hsh, http_dest, "#{root_node}/#{property}", true)
+    handle_creation(ar_node, hsh, http_src, http_dest, "#{root_node}/#{property}", true)
     # perform_requests(ar_node, http_src, http_dest, "#{root_node}/#{property}")
   end
 end
