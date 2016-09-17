@@ -55,13 +55,15 @@ WORKSPACE = ENV['WORKSPACE'] || 'default'
 USERNAME = ENV['USERNAME'] || 'admin'
 PASSWORD = ENV['PASSWORD']
 START_PATH = ENV['ROOT']
-
+DEPTH = 2
+RECURSIVE = true
 
 $DEBUG = false
+$DEBUG_DISPLAY = false
 
-def perform_requests(ar_node, http_src, http_dest, root_node, depth = 1)
-  uri_src = Addressable::URI.parse("#{WEBDAV_SRC}/server/#{WORKSPACE}/jcr%3aroot#{URI.encode(root_node)}.#{depth}.json")
-  uri_dest = Addressable::URI.parse("#{WEBDAV_DST}/server/#{WORKSPACE}/jcr%3aroot#{URI.encode(root_node)}.#{depth}.json")
+def perform_requests(ar_node, http_src, http_dest, root_node)
+  uri_src = Addressable::URI.parse("#{WEBDAV_SRC}/server/#{WORKSPACE}/jcr%3aroot#{URI.encode(root_node)}.#{DEPTH}.json")
+  uri_dest = Addressable::URI.parse("#{WEBDAV_DST}/server/#{WORKSPACE}/jcr%3aroot#{URI.encode(root_node)}.#{DEPTH}.json")
 
   print "** #{root_node} "
 
@@ -72,12 +74,16 @@ def perform_requests(ar_node, http_src, http_dest, root_node, depth = 1)
 
   request_dest = Net::HTTP::Get.new(uri_dest.request_uri)
   response_dest = http_dest.request(request_dest)
-  if response_dest.code == '404'
+  not_found = response_dest.code == '404'
+
+  if not_found
     puts "[creating]".green
+    display(ar_node, http_src, http_dest, data, root_node) if $DEBUG_DISPLAY
     handle_creation(ar_node, data, http_dest, root_node)
 
   else
     puts "[updating]".yellow
+    display(ar_node, http_src, http_dest, data, root_node) if $DEBUG_DISPLAY
     data_dest = JSON.parse(response_dest.body)
     keys_in_src = data.keys.sort - data_dest.keys.sort
     keys_in_dest = data_dest.keys.sort - data.keys.sort
@@ -87,10 +93,10 @@ def perform_requests(ar_node, http_src, http_dest, root_node, depth = 1)
       handle_add_remove_keys(data, data_dest, http_dest, root_node, keys_in_src, keys_in_dest)
     end
     changed = handle_merge(data, data_dest, http_dest, root_node, keys_in_common) if keys_in_common
-    puts '    [identical]' unless changed or keys_in_src.any? or keys_in_dest.any?
+    puts '    [identical]'.yellow unless changed or keys_in_src.any? or keys_in_dest.any?
 
     # Now add any child nodes to be done
-    add_all_child_nodes(ar_node, data, root_node)
+    add_all_child_nodes(ar_node, http_dest, data, root_node)
 
     puts "\n\n"
   end
@@ -98,11 +104,11 @@ def perform_requests(ar_node, http_src, http_dest, root_node, depth = 1)
   ar_node.update_attributes!(status: :complete, last_synced_at: DateTime.current)
 end
 
-def handle_creation(ar_node, data, http_dest, root_node)
+def handle_creation(ar_node, data, http_dest, root_node, subnode = false)
   uri_dest = URI("#{WEBDAV_DST}/server/#{WORKSPACE}/jcr%3aroot/")
 
   if root_node[/[\[\]]/]
-    puts "    !!! Skipping invalid duplicate node! #{root_node}"
+    puts "    !!! Skipping invalid duplicate node! #{root_node}".red
     return
   end
 
@@ -115,46 +121,52 @@ def handle_creation(ar_node, data, http_dest, root_node)
   request.basic_auth USERNAME, PASSWORD
 
   response_dest = http_dest.request(request)
-  raise "Failed POST to DEST: #{root_node}, #{response_dest.code}" unless response_dest.code == '200'
+
+  # If we are adding a subnode, they can fail if they already exist... just ignore and continue and the update will
+  # pick up the changes later
+  if subnode and response_dest.code == '403'
+    puts "    #{root_node} already exists".blue
+    return
+  end
+
+  raise "Failed POST to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
   response_body = JSON.parse(response_dest.body) unless response_dest.body.empty?
   puts "Success! #{response_body}" if $DEBUG
+  puts "    #{root_node}".green if subnode
 
   # Now add any child nodes to be done
-  add_all_child_nodes(ar_node, data, root_node)
+  add_all_child_nodes(ar_node, http_dest, data, root_node)
 end
 
-def add_all_child_nodes(ar_node, data, root_node)
+def add_all_child_nodes(ar_node, http_dest, data, root_node)
   data.each do |k, v|
     case v
       when Hash
-        handle_hash_or_child_nodes(ar_node, root_node, k, v)
+        handle_hash_or_child_nodes(ar_node, http_dest, root_node, k, v)
     end
   end
 end
 
-# def handle_creation2(data, _http_dest, root_node)
-#   puts "  Create node... to be done"
-#   data.each do |k, v|
-#     case v
-#       when TrueClass, FalseClass  then handle_bool(k, v)
-#       when String                 then handle_string(k, v)
-#       when Fixnum                 then handle_long(k, v)
-#       when Float                  then handle_float(k, v)
-#       when Array                  then handle_array(data, k, v)
-#       when Hash                   then handle_hash_or_child_nodes(k, v)
-#       else
-#         raise "  #{k} - unknown\n===\n #{v}\n===\n"
-#     end
-#   end
-#
-#   node = Node.create!(path: root_node, status: :incomplete, parent: nil, last_synced_at: DateTime.current)
-# end
+def display(ar_node, http_src, http_dest, data, root_node)
+  data.each do |k, v|
+    case v
+      when TrueClass, FalseClass  then display_bool(k, v)
+      when String                 then display_string(k, v)
+      when Fixnum                 then display_long(k, v)
+      when Float                  then display_float(k, v)
+      when Array                  then display_array(data, k, v)
+      when Hash                   then handle_hash_or_child_nodes(ar_node, http_dest, root_node, k, v, false)
+      else
+        raise "  #{k} - unknown\n===\n #{v}\n===\n"
+    end
+  end
+end
 
 def handle_add_remove_keys(data, data_dest, http_dest, root_node, keys_in_src, keys_in_dest)
 
   # Add keys in src, but set merging to false
   handle_merge(data, data_dest, http_dest, root_node, keys_in_src, false)
-  handle_remove_properties(http_dest, root_node, keys_in_dest)
+  handle_remove_properties(http_dest, data_dest, root_node, keys_in_dest)
 end
 
 def handle_merge(data, data_dest, http_dest, root_node, keys_in_common, is_merging = true)
@@ -184,7 +196,7 @@ def handle_merge(data, data_dest, http_dest, root_node, keys_in_common, is_mergi
       when Array then update_text.push "^#{root_node}/#{k} : #{v}"
       when Hash
       else
-        raise "Not handled: #{v.class}"
+        raise "Not handled: #{v.class}".red
     end
   end
   return false unless update_text.any?
@@ -195,14 +207,14 @@ def handle_merge(data, data_dest, http_dest, root_node, keys_in_common, is_mergi
   request.basic_auth USERNAME, PASSWORD
 
   response_dest = http_dest.request(request)
-  raise "Failed POST to DEST: #{root_node}, #{response_dest.code}" unless response_dest.code == '200'
+  raise "Failed POST to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
   response_body = JSON.parse(response_dest.body) unless response_dest.body.empty?
   puts "Successfully merged! #{response_body}" if $DEBUG
 
   differences
 end
 
-def handle_remove_properties(http_dest, root_node, keys_in_dest)
+def handle_remove_properties(http_dest, data_dest, root_node, keys_in_dest)
   update_text = []
   keys_in_dest.each do |k|
     next if k == 'jcr:uuid'
@@ -211,7 +223,7 @@ def handle_remove_properties(http_dest, root_node, keys_in_dest)
       next
     end
 
-    case v
+    case data_dest[k]
       when String then update_text.push "-#{root_node}/#{k}"
       when Fixnum then update_text.push "-#{root_node}/#{k}"
       when Float then update_text.push "-#{root_node}/#{k}"
@@ -219,7 +231,7 @@ def handle_remove_properties(http_dest, root_node, keys_in_dest)
       when Array then update_text.push "-#{root_node}/#{k}"
       when Hash
       else
-        raise "Not handled: #{v.class}"
+        raise "Not handled: #{v.class}".red
     end
   end
   return false unless update_text.any?
@@ -230,55 +242,61 @@ def handle_remove_properties(http_dest, root_node, keys_in_dest)
   request.basic_auth USERNAME, PASSWORD
 
   response_dest = http_dest.request(request)
-  raise "Failed POST to DEST: #{root_node}, #{response_dest.code}" unless response_dest.code == '200'
+  raise "Failed POST to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
   response_body = JSON.parse(response_dest.body) unless response_dest.body.empty?
   puts "Successfully removed! #{response_body}" if $DEBUG
 
 end
 
-# def handle_bool(k, v)
-#   puts "  #{k}: #{v} (Bool)" if $DEBUG
-# end
-#
-# def handle_string(k, v)
-#   puts "  #{k}: #{v} (String)" if $DEBUG
-# end
-#
-# def handle_long(k, v)
-#   puts "  #{k}: #{v} (Long)" if $DEBUG
-# end
-#
-# def handle_float(k, v)
-#   puts "  #{k}: #{v} (Float)" if $DEBUG
-# end
-#
-# def handle_array(data, property, ary)
-#   unless ary.any?
-#     puts "  #{property}: Array" if $DEBUG
-#     puts "     (empty set of '#{data[":#{property}"]}')" if $DEBUG
-#     return
-#   end
-#
-#   # return handle_child_nodes(property, ary) if ary[0].is_a? Hash and ary[0]['jcr:uuid'].present?
-#   puts "  #{property}: Array (multi-val property)" if $DEBUG
-#   puts "    #{ary}" if $DEBUG
-# end
-#
-
-def handle_hash_or_child_nodes(ar_node, root_node, property, hash)
-  return handle_child_nodes(ar_node, root_node, property, hash) if hash['jcr:primaryType'].present?
-  raise "  #{property}: Hash (multi-val property) data: #{hash}"
+def display_bool(k, v)
+  puts "  #{k}: #{v} (Bool)" if $DEBUG
 end
 
-def handle_child_nodes(ar_node, root_node, property, hsh)
+def display_string(k, v)
+  puts "  #{k}: #{v} (String)" if $DEBUG
+end
 
-  node = Node.where(path: "#{root_node}/#{property}").first_or_create!(status: :incomplete, parent: ar_node, last_synced_at: nil)
+def display_long(k, v)
+  puts "  #{k}: #{v} (Long)" if $DEBUG
+end
+
+def display_float(k, v)
+  puts "  #{k}: #{v} (Float)" if $DEBUG
+end
+
+def display_array(data, property, ary)
+  unless ary.any?
+    puts "  #{property}: Array" if $DEBUG
+    puts "     (empty set of '#{data[":#{property}"]}')" if $DEBUG
+    return
+  end
+
+  puts "  #{property}: Array (multi-val property)" if $DEBUG
+  puts "    #{ary}" if $DEBUG
+end
+
+
+def handle_hash_or_child_nodes(ar_node, http_dest, root_node, property, hash, create = true)
+  return handle_child_nodes(ar_node, http_dest, root_node, property, hash, create) if hash['jcr:primaryType'].present?
+  return if hash == {} # happens with sub-nodes?
+  raise "  #{property}: Hash (multi-val property) data: #{hash}".red
+end
+
+def handle_child_nodes(ar_node, http_dest, root_node, property, hsh, create = true)
+
+  node = Node.where(path: "#{root_node}/#{property}").first_or_create!(status: :incomplete, parent: ar_node, last_synced_at: nil) if create
 
   puts "  #{property}: Hash (child nodes)" if $DEBUG
   hsh.each do |k, v|
+    puts "    - #{k}: #{v}" if $DEBUG_DISPLAY
     next unless v.is_a? Hash
-    Node.where(path: "#{root_node}/#{property}/#{k}").first_or_create!(status: :incomplete, parent: node, last_synced_at: nil)
-    puts "    - #{k} with UUID #{v['jcr:uuid']}" if $DEBUG
+    Node.where(path: "#{root_node}/#{property}/#{k}").first_or_create!(status: :incomplete, parent: node, last_synced_at: nil) if create
+    puts "    - #{k} with UUID #{v['jcr:uuid']}" if $DEBUG and not $DEBUG_DISPLAY
+  end
+
+  if create and DEPTH >= 2
+    handle_creation(ar_node, hsh, http_dest, "#{root_node}/#{property}", true)
+    # perform_requests(ar_node, http_src, http_dest, "#{root_node}/#{property}")
   end
 end
 
@@ -294,12 +312,14 @@ def execute!
 
       # Handle the root node
       ar_node = Node.where(path: root_node).first_or_create!(status: :incomplete, parent: nil, last_synced_at: nil)
-      perform_requests(ar_node, http_src, http_dst, root_node, 1)
+      perform_requests(ar_node, http_src, http_dst, root_node)
 
       # Now search for any nodes to be synced
-      Node.where(status: :incomplete).order(:created_at, :id).find_in_batches(batch_size: 100) do |batch|
-        batch.each do |node|
-          perform_requests(node, http_src, http_dst, node.path, 1)
+      if RECURSIVE
+        Node.where(status: :incomplete).order(:created_at, :id).find_in_batches(batch_size: 100) do |batch|
+          batch.each do |node|
+            perform_requests(node, http_src, http_dst, node.path)
+          end
         end
       end
     end
