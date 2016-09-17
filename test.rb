@@ -2,7 +2,7 @@
 #
 # To use this script:
 #
-#   WEBDAV_SRC=http://www.thecollectingbug.com:8080 WEBDAV_DST=http://localhost:8080 PASSWORD=pw ROOT=/jcrpath ruby test.rb
+#   WEBDAV_SRC=http://localhost:8080 WEBDAV_DST=http://localhost:8080 PASSWORD=pw ROOT=/jcrpath ruby test.rb
 
 require 'active_record'
 require 'net/http'
@@ -14,23 +14,32 @@ require 'addressable/uri'
 require_relative 'app/models/application_record'
 require_relative 'app/models/node'
 
-# Monkey-patch multipart_post gem to remove filename from Content-Disposition
+# Monkey-patch multipart_post gem to add/remove filename from Content-Disposition
 module Parts
   class FilePart
     def build_head(boundary, name, filename, type, content_len, opts = {}, headers = {})
       trans_encoding = opts["Content-Transfer-Encoding"] || "binary"
       content_disposition = opts["Content-Disposition"] || "form-data"
 
+      # If we are submitting a binary value, then we should add the filename so we get streaming form fields
+      # in the JCR servlet... the filename can simply be the name
+      with_filename = (opts['Content-Type'] || '').include?('jcr-value/binary')
+
       part = ''
       part << "--#{boundary}\r\n"
-      part << "Content-Disposition: #{content_disposition}; name=\"#{name.to_s}\"\r\n"
+      if with_filename
+        part << "Content-Disposition: #{content_disposition}; name=\"#{name.to_s}\"; filename=\"#{name.to_s}\"\r\n"
+      else
+        part << "Content-Disposition: #{content_disposition}; name=\"#{name.to_s}\"\r\n"
+      end
       part << "Content-Length: #{content_len}\r\n"
       if content_id = opts["Content-ID"]
         part << "Content-ID: #{content_id}\r\n"
       end
 
-      if headers["Content-Type"] != nil
-        part <<  "Content-Type: " + headers["Content-Type"] + "\r\n"
+      # NOTE: Also, switch 'headers' for 'opt'
+      if opts["Content-Type"] != nil
+        part <<  "Content-Type: " + opts["Content-Type"] + "\r\n"
       else
         part << "Content-Type: #{type}\r\n"
       end
@@ -40,8 +49,6 @@ module Parts
     end
   end
 end
-
-
 
 
 
@@ -170,9 +177,9 @@ def handle_date_and_binary_properties(data, http_src, http_dest, root_node, date
     binary_resp = http_src.request(binary_req)
     raise "Failed GET (binary) from SRC: #{root_node}/#{k}, #{binary_resp.code}".red unless binary_resp.code == '200'
 
-
-    request = Net::HTTP::Post::Multipart.new(uri_dest, "#{root_node}/#{k}" =>
-        UploadIO.new(StringIO.new(binary_resp.body), BINARY_MIME_TYPE))
+    request = Net::HTTP::Post::Multipart.new(uri_dest,
+        { "#{root_node}/#{k}" => UploadIO.new(StringIO.new(binary_resp.body), BINARY_MIME_TYPE) },
+        { parts: { "#{root_node}/#{k}" => { 'Content-Type' => "#{BINARY_MIME_TYPE}" } } })
     request.basic_auth USERNAME, PASSWORD
     response_dest = http_dest.request(request)
     raise "Failed POST (binary) to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
