@@ -304,11 +304,11 @@ def handle_remove_properties(http_dest, data_dest, root_node, keys_in_dest)
     next if k.start_with?(':')
 
     case data_dest[k]
-      when String then update_text.push "-#{root_node}/#{k}"
-      when Fixnum then update_text.push "-#{root_node}/#{k}"
-      when Float then update_text.push "-#{root_node}/#{k}"
-      when TrueClass, FalseClass then update_text.push "-#{root_node}/#{k}"
-      when Array then update_text.push "-#{root_node}/#{k}"
+      when String then update_text.push "-#{root_node}/#{k} : "
+      when Fixnum then update_text.push "-#{root_node}/#{k} : "
+      when Float then update_text.push "-#{root_node}/#{k} : "
+      when TrueClass, FalseClass then update_text.push "-#{root_node}/#{k} : "
+      when Array then update_text.push "-#{root_node}/#{k} : "
       when Hash
       else
         raise "Not handled: #{v.class}".red
