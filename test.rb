@@ -238,7 +238,20 @@ def handle_merge(data, data_dest, http_src, http_dest, root_node, keys_in_common
     next if data[k].is_a? Hash
     next unless !is_merging or data[k] != data_dest[k]
     differences = true
-    puts "    mismatch in #{k}: #{data[k]}; and: #{data_dest[k]}" if is_merging
+    if is_merging
+      puts "    mismatch in #{k}: #{data[k]}; and: #{data_dest[k]}"
+      if data[k].is_a? Array and not data_dest[k].is_a? Array
+        puts "    [XML import] replace single-value property with multi-value property...".yellow
+
+        uri_dest = URI("#{WEBDAV_DST}/server/#{WORKSPACE}/jcr%3aroot/")
+        request = Net::HTTP::Post::Multipart.new(uri_dest,
+                                                 ':diff' => UploadIO.new(StringIO.new("-#{root_node}/#{k} : "), 'text/plain'))
+        request.basic_auth USERNAME, PASSWORD
+
+        response_dest = http_dest.request(request)
+        raise "Failed POST to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
+      end
+    end
     updates[k] = data[k]
   end
 
