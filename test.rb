@@ -130,25 +130,31 @@ def handle_creation(ar_node, data, http_src, http_dest, root_node, subnode = fal
   binary_keys = data.select { |k, v| k.start_with?(':') and !k.start_with?('::') and v.is_a? Fixnum }.keys.collect { |k| k.gsub(/^:/, '')}
   filtered_data.delete_if { |k, _v| date_keys.include?(k) or binary_keys.include?(k) }
 
-  request = Net::HTTP::Post::Multipart.new(uri_dest, ':diff' =>
-      UploadIO.new(StringIO.new("+#{root_node} : #{filtered_data.to_json}"), 'text/plain'))
-  request.basic_auth USERNAME, PASSWORD
-  response_dest = http_dest.request(request)
+  # if is this a subnode, then only create if we don't already have a record
+  prev_record = Node.where(path: root_node).first if subnode
+  if not subnode or not prev_record
+    request = Net::HTTP::Post::Multipart.new(uri_dest, ':diff' =>
+        UploadIO.new(StringIO.new("+#{root_node} : #{filtered_data.to_json}"), 'text/plain'))
+    request.basic_auth USERNAME, PASSWORD
+    response_dest = http_dest.request(request)
 
-  # If we are adding a subnode, they can fail if they already exist... just ignore and continue and the update will
-  # pick up the changes later
-  if subnode and response_dest.code == '403'
-    puts "    #{root_node} already exists".blue
-    return
+    # If we are adding a subnode, they can fail if they already exist... just ignore and continue and the update will
+    # pick up the changes later
+    if subnode and response_dest.code == '403'
+      puts "    #{root_node} already exists".blue
+      return
+    end
+
+    raise "Failed POST to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
+    response_body = JSON.parse(response_dest.body) unless response_dest.body.empty?
+    puts "Success! #{response_body}" if $DEBUG
+    puts "    #{root_node}".green if subnode
+  else
+    puts "    #{root_node} exists".blue if subnode
   end
 
-  raise "Failed POST to DEST: #{root_node}, #{response_dest.code}".red unless response_dest.code == '200'
-  response_body = JSON.parse(response_dest.body) unless response_dest.body.empty?
-  puts "Success! #{response_body}" if $DEBUG
-  puts "    #{root_node}".green if subnode
-
   # Now add any date and binary keys
-  handle_date_and_binary_properties(data, http_src, http_dest, root_node, date_keys, binary_keys)
+  handle_date_and_binary_properties(data, http_src, http_dest, root_node, date_keys, binary_keys) unless prev_record
 
   # Now add any child nodes to be done (only at the top level)
   add_all_child_nodes(ar_node, http_src, http_dest, data, root_node) unless subnode
