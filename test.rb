@@ -62,7 +62,7 @@ WORKSPACE = ENV['WORKSPACE'] || 'default'
 USERNAME = ENV['USERNAME'] || 'admin'
 PASSWORD = ENV['PASSWORD']
 START_PATH = ENV['ROOT']
-DEPTH = 2
+DEPTH = 1
 RECURSIVE = true
 
 DATE_MIME_TYPE = 'jcr-value/date'
@@ -129,6 +129,7 @@ def handle_creation(ar_node, data, http_src, http_dest, root_node, subnode = fal
   date_keys = data.select { |k, v| k.start_with?(':') and v == 'Date' }.keys.collect { |k| k.gsub(/^:/, '')}
   binary_keys = data.select { |k, v| k.start_with?(':') and !k.start_with?('::') and v.is_a? Fixnum }.keys.collect { |k| k.gsub(/^:/, '')}
   filtered_data.delete_if { |k, _v| date_keys.include?(k) or binary_keys.include?(k) }
+  filtered_data.delete_if { |k, _v| k == 'jcr:uuid' } if ENV['STRIP_UUID'] == '1'
 
   # if is this a subnode, then only create if we don't already have a record
   prev_record = Node.where(path: root_node).first if subnode
